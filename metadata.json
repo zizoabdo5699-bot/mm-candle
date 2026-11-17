@@ -1,0 +1,8 @@
+{
+  "name": "Remix M\u0026M Candle Co.",
+  "description": "متجر M\u0026M Candle Co. للشموع العطرية ومعطرات الجو المصنوعة يدويًا.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}
