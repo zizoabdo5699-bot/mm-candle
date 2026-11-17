@@ -1,20 +1,43 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Flame, Plus, Check } from 'lucide-react';
-import { STORE_CONFIG } from '../config';
+import { STORE_CONFIG, type StoreRuntimeConfig } from '../config';
 import { formatEGP, type CustomCandleDetails, type Product } from '../data/catalog';
 import type { CartItem } from './CartDrawer';
 
 interface CustomCandleSectionProps {
+  config?: StoreRuntimeConfig['customCandle'];
   onAddCustomToCart: (item: CartItem) => void;
 }
 
-export function CustomCandleSection({ onAddCustomToCart }: CustomCandleSectionProps) {
-  const { sizes, colors, scents, jarTypes } = STORE_CONFIG.customCandle;
+export function CustomCandleSection({
+  config = STORE_CONFIG.customCandle,
+  onAddCustomToCart,
+}: CustomCandleSectionProps) {
+  const sizes = config.sizes.length > 0 ? config.sizes : STORE_CONFIG.customCandle.sizes;
+  const colors = config.colors.length > 0 ? config.colors : STORE_CONFIG.customCandle.colors;
+  const scents = config.scents.length > 0 ? config.scents : STORE_CONFIG.customCandle.scents;
+  const jarTypes =
+    config.jarTypes.length > 0 ? config.jarTypes : STORE_CONFIG.customCandle.jarTypes;
 
   const [selectedSizeId, setSelectedSizeId] = useState<string>(sizes[1]?.id || sizes[0]?.id);
   const [selectedColorId, setSelectedColorId] = useState<string>(colors[0]?.id);
   const [selectedScent, setSelectedScent] = useState<string>(scents[0]);
   const [selectedJarId, setSelectedJarId] = useState<string>(jarTypes[0]?.id);
+
+  useEffect(() => {
+    if (!sizes.some((s) => s.id === selectedSizeId) && sizes[0]) {
+      setSelectedSizeId(sizes[0].id);
+    }
+    if (!colors.some((c) => c.id === selectedColorId) && colors[0]) {
+      setSelectedColorId(colors[0].id);
+    }
+    if (!scents.includes(selectedScent) && scents[0]) {
+      setSelectedScent(scents[0]);
+    }
+    if (!jarTypes.some((j) => j.id === selectedJarId) && jarTypes[0]) {
+      setSelectedJarId(jarTypes[0].id);
+    }
+  }, [sizes, colors, scents, jarTypes, selectedSizeId, selectedColorId, selectedScent, selectedJarId]);
 
   const selectedSize = sizes.find((s) => s.id === selectedSizeId) || sizes[0];
   const selectedColor = colors.find((c) => c.id === selectedColorId) || colors[0];

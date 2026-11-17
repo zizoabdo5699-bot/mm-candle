@@ -1,4 +1,12 @@
-import { STORE_CONFIG, type CandleJarType } from '../config';
+import {
+  DEFAULT_GOVERNORATES,
+  STORE_CONFIG,
+  type CandleJarType,
+  type GovernorateRate,
+  type StoreRuntimeConfig,
+} from '../config';
+
+export type { GovernorateRate, StoreRuntimeConfig };
 
 export type ProductCategory = 'candles' | 'diffusers' | 'gifts';
 
@@ -65,6 +73,9 @@ export interface TrackableOrder {
   orderNumber: string;
   customerName: string;
   phone?: string;
+  customerEmail?: string;
+  sendViaEmail?: boolean;
+  emailSent?: boolean;
   governorate: string;
   address?: string;
   notes?: string;
@@ -72,14 +83,16 @@ export interface TrackableOrder {
   itemCount: number;
   subtotal?: number;
   shippingFee?: number;
+  giftWrap?: boolean;
+  giftWrapFee?: number;
+  giftMessage?: string;
   total: number;
   status: OrderStatus;
   stockDeducted?: boolean;
   createdAt: string;
+  createdAtISO?: string;
   updatedAt: string;
   items: OrderLineItem[];
-  giftWrap?: boolean;
-  giftMessage?: string;
 }
 
 export interface AdminNotification {
@@ -121,74 +134,7 @@ export const WHATSAPP_NUMBER = STORE_CONFIG.whatsappNumber;
 export const FREE_SHIPPING_THRESHOLD = STORE_CONFIG.freeShippingThreshold;
 export const GIFT_WRAP_FEE = STORE_CONFIG.giftWrapFee;
 
-export interface GovernorateRate {
-  name: string;
-  zone: string;
-  fee: number;
-  eta: string;
-}
-
-export const GOVERNORATES: GovernorateRate[] = [
-  { name: 'فيصل - الهرم', zone: 'الجيزة', fee: 75, eta: '٢٤ - ٤٨ ساعة' },
-  {
-    name: 'أكتوبر - زايد - حدائق الأهرام - حدائق أكتوبر',
-    zone: 'الجيزة',
-    fee: 80,
-    eta: '٢٤ - ٤٨ ساعة',
-  },
-  { name: 'ضواحي الجيزة', zone: 'الجيزة', fee: 85, eta: '٢ - ٣ أيام عمل' },
-  { name: 'إمبابة - المهندسين - الوراق', zone: 'الجيزة', fee: 75, eta: '٢٤ - ٤٨ ساعة' },
-  {
-    name: 'وسط البلد - العباسية - بولاق أبو العلا - التحرير',
-    zone: 'القاهرة',
-    fee: 75,
-    eta: '٢٤ - ٤٨ ساعة',
-  },
-  {
-    name: 'مصر الجديدة - روكسي - ألماظة - جسر السويس - النزهة الجديدة - عين شمس',
-    zone: 'القاهرة',
-    fee: 75,
-    eta: '٢٤ - ٤٨ ساعة',
-  },
-  { name: 'عزبة النخل - المطرية - المرج', zone: 'القاهرة', fee: 75, eta: '٢٤ - ٤٨ ساعة' },
-  { name: 'شبرا مصر - شبرا الخيمة', zone: 'القاهرة الكبرى', fee: 75, eta: '٢٤ - ٤٨ ساعة' },
-  { name: 'المدن الجديدة والتجمعات', zone: 'القاهرة الجديدة', fee: 80, eta: '٢٤ - ٤٨ ساعة' },
-  { name: 'مدينة بدر', zone: 'القاهرة الجديدة', fee: 90, eta: '٢ - ٣ أيام عمل' },
-  {
-    name: 'مدينة نصر - زهراء مدينة نصر - حدائق القبة',
-    zone: 'القاهرة',
-    fee: 75,
-    eta: '٢٤ - ٤٨ ساعة',
-  },
-  {
-    name: 'المعادي - حدائق المعادي - المقطم - الفسطاط الجديدة',
-    zone: 'القاهرة',
-    fee: 75,
-    eta: '٢٤ - ٤٨ ساعة',
-  },
-  {
-    name: 'دار السلام - البساتين - فايدة كامل - السيدة عائشة',
-    zone: 'القاهرة',
-    fee: 75,
-    eta: '٢٤ - ٤٨ ساعة',
-  },
-  {
-    name: 'العمرانية - بولاق الدكرور - المنيب - صفط اللبن',
-    zone: 'الجيزة',
-    fee: 75,
-    eta: '٢٤ - ٤٨ ساعة',
-  },
-  { name: 'السيدة زينب - المنيل', zone: 'القاهرة', fee: 75, eta: '٢٤ - ٤٨ ساعة' },
-  { name: 'حلوان - ١٥ مايو', zone: 'جنوب القاهرة', fee: 80, eta: '٢٤ - ٤٨ ساعة' },
-  { name: 'الدلتا والقنال (وجه بحري)', zone: 'وجه بحري', fee: 90, eta: '٢ - ٣ أيام عمل' },
-  { name: 'الصعيد (وجه قبلي)', zone: 'وجه قبلي', fee: 105, eta: '٣ - ٤ أيام عمل' },
-  {
-    name: 'البحر الأحمر - الغردقة - الوادي الجديد',
-    zone: 'المحافظات الساحلية والحدودية',
-    fee: 150,
-    eta: '٣ - ٥ أيام عمل',
-  },
-];
+export const GOVERNORATES: GovernorateRate[] = DEFAULT_GOVERNORATES;
 
 export interface ShippingEstimate {
   governorate: GovernorateRate;
@@ -197,21 +143,27 @@ export interface ShippingEstimate {
   remainingForFree: number;
 }
 
-export function estimateShipping(subtotal: number, governorateName: string): ShippingEstimate {
-  const direct = GOVERNORATES.find((g) => g.name === governorateName);
+export function estimateShipping(
+  subtotal: number,
+  governorateName: string,
+  governoratesList: GovernorateRate[] = GOVERNORATES,
+  freeShippingThreshold: number = FREE_SHIPPING_THRESHOLD
+): ShippingEstimate {
+  const list = governoratesList.length > 0 ? governoratesList : GOVERNORATES;
+  const direct = list.find((g) => g.name === governorateName);
   const legacyFallback =
     governorateName === 'القاهرة'
-      ? GOVERNORATES[4]
+      ? list[4]
       : governorateName === 'البحر الأحمر'
-      ? GOVERNORATES[18]
+      ? list[list.length - 1]
       : undefined;
-  const governorate = direct ?? legacyFallback ?? GOVERNORATES[0];
-  const isFree = subtotal >= FREE_SHIPPING_THRESHOLD;
+  const governorate = direct ?? legacyFallback ?? list[0];
+  const isFree = subtotal >= freeShippingThreshold;
   return {
     governorate,
     fee: subtotal === 0 ? 0 : isFree ? 0 : governorate.fee,
     isFree: subtotal > 0 && isFree,
-    remainingForFree: Math.max(0, FREE_SHIPPING_THRESHOLD - subtotal),
+    remainingForFree: Math.max(0, freeShippingThreshold - subtotal),
   };
 }
 

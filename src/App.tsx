@@ -10,20 +10,22 @@ import {
   Flame,
   X,
   Lock,
+  Heart,
 } from 'lucide-react';
+import { STORE_CONFIG, type StoreRuntimeConfig } from './config';
 import {
   INITIAL_REVIEWS,
+  INITIAL_SCENT_POLL,
   INITIAL_SEASONAL_OFFER,
-  LOW_STOCK_THRESHOLD,
   PRODUCTS,
   SCENT_PROFILES,
-  WHATSAPP_NUMBER,
   formatEGP,
   getProductPricing,
   matchProductSearch,
   type CustomerReview,
   type Product,
   type ProductCategory,
+  type ScentPollOption,
   type SeasonalOffer,
 } from './data/catalog';
 import { Navbar } from './components/Navbar';
@@ -50,6 +52,7 @@ type FilterTab = 'all' | ProductCategory;
 const DEFAULT_CUSTOMER: CustomerDetails = {
   name: '',
   phone: '',
+  email: '',
   governorate: 'وسط البلد - العباسية - بولاق أبو العلا - التحرير',
   address: '',
   notes: '',
@@ -57,6 +60,8 @@ const DEFAULT_CUSTOMER: CustomerDetails = {
   hasGiftMessage: false,
   giftMessage: '',
   giftWrap: false,
+  sendViaWhatsapp: false,
+  sendViaEmail: false,
 };
 
 function readJsonStorage<T>(key: string, fallback: T): T {
@@ -89,6 +94,11 @@ export default function App() {
 
   const [products, setProducts] = useState<Product[]>(PRODUCTS);
   const [seasonalOffer, setSeasonalOffer] = useState<SeasonalOffer>(INITIAL_SEASONAL_OFFER);
+  const [storeConfig, setStoreConfig] = useState<StoreRuntimeConfig>(STORE_CONFIG);
+  const [scentPoll, setScentPoll] = useState<ScentPollOption[]>(INITIAL_SCENT_POLL);
+  const [favorites, setFavorites] = useState<number[]>(() =>
+    readJsonStorage<number[]>('mm_favorites', [])
+  );
   const [nowMs, setNowMs] = useState<number>(() => Date.now());
   const [adminOpen, setAdminOpen] = useState<boolean>(() => {
     try {
@@ -136,14 +146,30 @@ export default function App() {
     let cancelled = false;
     fetch('/api/products')
       .then((res) => (res.ok ? res.json() : null))
-      .then((data: { products?: Product[]; seasonalOffer?: SeasonalOffer } | null) => {
-        if (!cancelled && data?.products && Array.isArray(data.products)) {
-          syncWithCatalog(
-            data.products,
-            data.seasonalOffer ? data.seasonalOffer : seasonalOffer
-          );
+      .then(
+        (
+          data: {
+            products?: Product[];
+            seasonalOffer?: SeasonalOffer;
+            storeConfig?: StoreRuntimeConfig;
+            scentPoll?: ScentPollOption[];
+          } | null
+        ) => {
+          if (cancelled || !data) return;
+          if (data.storeConfig) {
+            setStoreConfig(data.storeConfig);
+          }
+          if (data.scentPoll && Array.isArray(data.scentPoll)) {
+            setScentPoll(data.scentPoll);
+          }
+          if (data.products && Array.isArray(data.products)) {
+            syncWithCatalog(
+              data.products,
+              data.seasonalOffer ? data.seasonalOffer : seasonalOffer
+            );
+          }
         }
-      })
+      )
       .catch(() => {
         // fallback to default products if offline
       });
@@ -213,6 +239,14 @@ export default function App() {
       // ignore storage errors
     }
   }, [userReviews]);
+
+  useEffect(() => {
+    try {
+      window.localStorage.setItem('mm_favorites', JSON.stringify(favorites));
+    } catch {
+      // ignore storage errors
+    }
+  }, [favorites]);
 
   useEffect(() => {
     if (!toast) return;
@@ -456,6 +490,46 @@ export default function App() {
     orderEl?.scrollIntoView({ behavior: 'smooth' });
   };
 
+  const handleToggleFavorite = (productId: number) => {
+    const targetProduct = products.find((p) => p.id === productId);
+    setFavorites((prev) => {
+      const exists = prev.includes(productId);
+      const next = exists ? prev.filter((id) => id !== productId) : [...prev, productId];
+      if (targetProduct) {
+        setToast(
+          exists
+            ? `تمت إزالة «${targetProduct.name}» من المفضلة`
+            : `تمت إضافة «${targetProduct.name}» إلى المفضلة`
+        );
+      }
+      return next;
+    });
+  };
+
+  const openAdmin = () => {
+    setAdminOpen(true);
+    try {
+      if (window.location.hash !== '#admin') {
+        window.history.replaceState(null, '', '#admin');
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const closeAdmin = () => {
+    setAdminOpen(false);
+    try {
+      if (window.location.hash === '#admin') {
+        window.history.replaceState(null, '', window.location.pathname + window.location.search);
+      }
+    } catch {
+      // ignore
+    }
+  };
+
+  const favoriteProducts = products.filter((p) => favorites.includes(p.id));
+
   return (
     <div
       id="top"
@@ -543,7 +617,7 @@ export default function App() {
 
               <button
                 type="button"
-                onClick={() => setAdminOpen(true)}
+                onClick={openAdmin}
                 className="min-h-[46px] px-4 py-3 rounded-full border border-[#d9c3a0]/30 hover:border-[#d4aa63] bg-white/5 text-[#f3e9df] text-xs font-semibold inline-flex items-center gap-2 transition-colors cursor-pointer whitespace-nowrap"
               >
                 <Lock className="w-3.5 h-3.5 text-[#d4aa63]" aria-hidden="true" />
@@ -664,37 +738,57 @@ export default function App() {
               const ratingSummary = getProductRating(product);
               const stockCount = product.stock ?? 0;
               const isOutOfStock = stockCount <= 0;
-              const isLowStock = stockCount > 0 && stockCount <= LOW_STOCK_THRESHOLD;
+              const isLowStock = stockCount > 0 && stockCount <= storeConfig.lowStockThreshold;
               const pricing = getProductPricing(product, seasonalOffer, nowMs);
+              const isFav = favorites.includes(product.id);
               return (
                 <article
                   key={product.id}
                   className="group rounded-2xl bg-[#fffdf9] dark:bg-[#211815] border border-[#e8dccd] dark:border-[#3a2b26] overflow-hidden flex flex-col transition-transform duration-200 ease-out hover:-translate-y-0.5 hover:shadow-lg"
                 >
-                  <button
-                    type="button"
-                    onClick={() => setSelectedProduct(product)}
-                    aria-label={`عرض تفاصيل ${product.name}`}
-                    className="relative aspect-square w-full overflow-hidden text-right cursor-pointer focus-visible:outline-2 focus-visible:outline-[#b98a3e]"
-                  >
-                    <ProductArtwork product={product} />
-                    {pricing.isDiscounted && (
-                      <span className="absolute top-3 left-3 px-2.5 py-1 rounded-md bg-[#9b3046] text-white text-[11px] font-bold shadow-md tabular-nums">
-                        خصم {pricing.discountPercent.toLocaleString('ar-EG')}٪
-                      </span>
-                    )}
-                    {isLowStock && (
-                      <span className="absolute top-3 right-3 px-2.5 py-1 rounded-md bg-[#9a3412] text-[#fef3c7] text-[11px] font-bold inline-flex items-center gap-1 shadow-md">
-                        <Flame className="w-3 h-3 shrink-0" aria-hidden="true" />
-                        <span>قليل المخزون</span>
-                      </span>
-                    )}
-                    {isOutOfStock && (
-                      <span className="absolute top-3 right-3 px-2.5 py-1 rounded-md bg-[#2a1a17]/95 text-[#faf6f0] text-[11px] font-bold shadow-md">
-                        نفذ
-                      </span>
-                    )}
-                  </button>
+                  <div className="relative aspect-square w-full overflow-hidden">
+                    <button
+                      type="button"
+                      onClick={() => setSelectedProduct(product)}
+                      aria-label={`عرض تفاصيل ${product.name}`}
+                      className="relative w-full h-full overflow-hidden text-right cursor-pointer focus-visible:outline-2 focus-visible:outline-[#b98a3e]"
+                    >
+                      <ProductArtwork product={product} />
+                      {pricing.isDiscounted && (
+                        <span className="absolute bottom-3 right-3 px-2.5 py-1 rounded-md bg-[#9b3046] text-white text-[11px] font-bold shadow-md tabular-nums">
+                          خصم {pricing.discountPercent.toLocaleString('ar-EG')}٪
+                        </span>
+                      )}
+                      {isLowStock && (
+                        <span className="absolute top-3 right-3 px-2.5 py-1 rounded-md bg-[#9a3412] text-[#fef3c7] text-[11px] font-bold inline-flex items-center gap-1 shadow-md">
+                          <Flame className="w-3 h-3 shrink-0" aria-hidden="true" />
+                          <span>قليل المخزون</span>
+                        </span>
+                      )}
+                      {isOutOfStock && (
+                        <span className="absolute top-3 right-3 px-2.5 py-1 rounded-md bg-[#2a1a17]/95 text-[#faf6f0] text-[11px] font-bold shadow-md">
+                          نفذ
+                        </span>
+                      )}
+                    </button>
+
+                    <button
+                      type="button"
+                      onClick={() => handleToggleFavorite(product.id)}
+                      aria-label={
+                        isFav ? `إزالة ${product.name} من المفضلة` : `إضافة ${product.name} إلى المفضلة`
+                      }
+                      aria-pressed={isFav}
+                      title={isFav ? 'إزالة من المفضلة' : 'إضافة إلى المفضلة'}
+                      className={`absolute top-3 left-3 z-10 w-9 h-9 rounded-full flex items-center justify-center shadow-md border transition-all cursor-pointer ${
+                        isFav
+                          ? 'bg-[#9b3046] border-[#9b3046] text-white scale-105'
+                          : 'bg-[#fffdf9]/90 dark:bg-[#211815]/90 border-[#e8dccd] dark:border-[#3a2b26] text-[#6f5a53] dark:text-[#d9c3a0] hover:text-[#9b3046] dark:hover:text-[#f3e9df]'
+                      }`}
+                    >
+                      <Heart className={`w-4 h-4 ${isFav ? 'fill-current' : ''}`} aria-hidden="true" />
+                    </button>
+                  </div>
 
                   <div className="p-5 flex flex-col flex-1 gap-3">
                     <div className="flex items-center justify-between gap-2 text-xs text-[#7a655f] dark:text-[#b9a79b]">
@@ -793,10 +887,16 @@ export default function App() {
         </section>
 
         {/* Section 2B: Custom Perfume Builder */}
-        <CustomPerfumeSection onAddCustomToCart={handleAddCustomToCart} />
+        <CustomPerfumeSection
+          config={storeConfig.customPerfume}
+          onAddCustomToCart={handleAddCustomToCart}
+        />
 
         {/* Section 2C: Custom Candle Builder */}
-        <CustomCandleSection onAddCustomToCart={handleAddCustomToCart} />
+        <CustomCandleSection
+          config={storeConfig.customCandle}
+          onAddCustomToCart={handleAddCustomToCart}
+        />
 
         {/* Section 3: Craftsmanship & Interactive Scent Atelier */}
         <section
@@ -965,6 +1065,7 @@ export default function App() {
           items={cart}
           customer={customer}
           lastOrder={lastOrder}
+          storeConfig={storeConfig}
           onChangeCustomer={setCustomer}
           onUpdateQty={handleUpdateQty}
           onRemoveItem={handleRemoveItem}
@@ -974,7 +1075,7 @@ export default function App() {
         />
 
         {/* Section 7: Scent of the Month Community Poll */}
-        <ScentPollSection />
+        <ScentPollSection externalOptions={scentPoll} />
       </main>
 
       {/* Footer */}
@@ -985,7 +1086,7 @@ export default function App() {
           </p>
           <div className="flex flex-wrap items-center justify-center gap-4 sm:gap-6">
             <a
-              href={`https://wa.me/${WHATSAPP_NUMBER}`}
+              href={`https://wa.me/${storeConfig.whatsappNumber}`}
               target="_blank"
               rel="noopener noreferrer"
               className="inline-flex items-center gap-1.5 hover:text-[#2a1a17] dark:hover:text-[#f3e9df] transition-colors"
@@ -1002,7 +1103,7 @@ export default function App() {
             </button>
             <button
               type="button"
-              onClick={() => setAdminOpen(true)}
+              onClick={openAdmin}
               className="px-3.5 py-2 rounded-lg border border-[#e8dccd] dark:border-[#3a2b26] bg-[#fffdf9] dark:bg-[#211815] text-[#2a1a17] dark:text-[#f3e9df] hover:border-[#9b3046] dark:hover:border-[#d4aa63] text-xs font-bold inline-flex items-center gap-1.5 transition-colors cursor-pointer"
             >
               <Lock className="w-3.5 h-3.5 text-[#9b3046] dark:text-[#d4aa63]" aria-hidden="true" />
@@ -1018,6 +1119,9 @@ export default function App() {
         ratingSummary={selectedProduct ? getProductRating(selectedProduct) : undefined}
         seasonalOffer={seasonalOffer}
         nowMs={nowMs}
+        lowStockThreshold={storeConfig.lowStockThreshold}
+        isFavorite={selectedProduct ? favorites.includes(selectedProduct.id) : false}
+        onToggleFavorite={handleToggleFavorite}
         onClose={() => setSelectedProduct(null)}
         onAddToCart={handleAddToCart}
       />
@@ -1026,22 +1130,32 @@ export default function App() {
       <CartDrawer
         open={cartOpen}
         items={cart}
+        favoriteProducts={favoriteProducts}
+        seasonalOffer={seasonalOffer}
+        nowMs={nowMs}
+        storeConfig={storeConfig}
         governorate={customer.governorate}
         onChangeGovernorate={(gov) => setCustomer((prev) => ({ ...prev, governorate: gov }))}
         onClose={() => setCartOpen(false)}
         onUpdateQty={handleUpdateQty}
         onRemoveItem={handleRemoveItem}
+        onToggleFavorite={handleToggleFavorite}
+        onAddFavoriteToCart={(prod) => handleAddToCart(prod, prod.scents[0], 1)}
         onProceedToCheckout={handleProceedToCheckout}
       />
 
-      {/* Admin Dashboard Modal */}
+      {/* Full-Page Admin Control Center */}
       <AdminDashboardModal
         open={adminOpen}
         products={products}
         seasonalOffer={seasonalOffer}
-        onClose={() => setAdminOpen(false)}
+        storeConfig={storeConfig}
+        scentPoll={scentPoll}
+        onClose={closeAdmin}
         onProductsUpdated={(nextProducts) => syncWithCatalog(nextProducts, seasonalOffer)}
         onSeasonalOfferUpdated={(nextOffer) => syncWithCatalog(products, nextOffer)}
+        onStoreConfigUpdated={setStoreConfig}
+        onScentPollUpdated={setScentPoll}
       />
 
       {/* Floating Action Button for Quick Cart Access */}

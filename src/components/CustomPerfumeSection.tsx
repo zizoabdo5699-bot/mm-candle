@@ -1,19 +1,34 @@
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { Plus, Sparkles, Check } from 'lucide-react';
-import { STORE_CONFIG } from '../config';
+import { STORE_CONFIG, type StoreRuntimeConfig } from '../config';
 import { formatEGP, type CustomPerfumeDetails, type Product } from '../data/catalog';
 import type { CartItem } from './CartDrawer';
 
 interface CustomPerfumeSectionProps {
+  config?: StoreRuntimeConfig['customPerfume'];
   onAddCustomToCart: (item: CartItem) => void;
 }
 
-export function CustomPerfumeSection({ onAddCustomToCart }: CustomPerfumeSectionProps) {
-  const sizes = STORE_CONFIG.customPerfume.sizes;
+export function CustomPerfumeSection({
+  config = STORE_CONFIG.customPerfume,
+  onAddCustomToCart,
+}: CustomPerfumeSectionProps) {
+  const sizes = config.sizes.length > 0 ? config.sizes : STORE_CONFIG.customPerfume.sizes;
+  const suggestedScents =
+    config.suggestedScents.length > 0
+      ? config.suggestedScents
+      : STORE_CONFIG.customPerfume.suggestedScents;
+
   const [scentName, setScentName] = useState('');
   const [bottleName, setBottleName] = useState('');
   const [selectedSizeId, setSelectedSizeId] = useState<string>(sizes[0]?.id || '50ml');
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!sizes.some((s) => s.id === selectedSizeId) && sizes[0]) {
+      setSelectedSizeId(sizes[0].id);
+    }
+  }, [sizes, selectedSizeId]);
 
   const selectedSize = sizes.find((s) => s.id === selectedSizeId) || sizes[0];
 
@@ -130,7 +145,7 @@ export function CustomPerfumeSection({ onAddCustomToCart }: CustomPerfumeSection
                 <span className="text-[11px] text-[#7a655f] dark:text-[#b9a79b] ml-1">
                   اقتراحات شائعة:
                 </span>
-                {STORE_CONFIG.customPerfume.suggestedScents.map((suggestion) => (
+                {suggestedScents.map((suggestion) => (
                   <button
                     key={suggestion}
                     type="button"

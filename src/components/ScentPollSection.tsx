@@ -4,8 +4,14 @@ import { INITIAL_SCENT_POLL, type ScentPollOption } from '../data/catalog';
 
 const STORAGE_KEY = 'mm_scent_poll_vote';
 
-export function ScentPollSection() {
-  const [options, setOptions] = useState<ScentPollOption[]>(INITIAL_SCENT_POLL);
+interface ScentPollSectionProps {
+  externalOptions?: ScentPollOption[] | null;
+}
+
+export function ScentPollSection({ externalOptions }: ScentPollSectionProps = {}) {
+  const [options, setOptions] = useState<ScentPollOption[]>(
+    externalOptions && externalOptions.length > 0 ? externalOptions : INITIAL_SCENT_POLL
+  );
   const [selectedId, setSelectedId] = useState<string | null>(() => {
     try {
       return window.localStorage.getItem(STORAGE_KEY);
@@ -14,6 +20,12 @@ export function ScentPollSection() {
     }
   });
   const [submittingId, setSubmittingId] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (externalOptions && externalOptions.length > 0) {
+      setOptions(externalOptions);
+    }
+  }, [externalOptions]);
 
   useEffect(() => {
     let cancelled = false;

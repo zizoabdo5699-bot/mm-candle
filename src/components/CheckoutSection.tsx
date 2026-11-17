@@ -9,21 +9,18 @@ import {
   Check,
   Truck,
   Gift,
+  Mail,
+  X,
+  ExternalLink,
 } from 'lucide-react';
-import {
-  FREE_SHIPPING_THRESHOLD,
-  GIFT_WRAP_FEE,
-  GOVERNORATES,
-  WHATSAPP_NUMBER,
-  estimateShipping,
-  formatEGP,
-  type Product,
-} from '../data/catalog';
+import { STORE_CONFIG, type StoreRuntimeConfig } from '../config';
+import { estimateShipping, formatEGP, type Product } from '../data/catalog';
 import type { CartItem } from './CartDrawer';
 
 export interface CustomerDetails {
   name: string;
   phone: string;
+  email?: string;
   governorate: string;
   address: string;
   notes: string;
@@ -32,6 +29,15 @@ export interface CustomerDetails {
   giftMessage?: string;
   giftWrap?: boolean;
   sendViaWhatsapp?: boolean;
+  sendViaEmail?: boolean;
+}
+
+export interface EmailOrderStatus {
+  requested: boolean;
+  sent: boolean;
+  providerConfigured: boolean;
+  recipient?: string;
+  message?: string;
 }
 
 export interface ConfirmedOrder {
@@ -42,12 +48,17 @@ export interface ConfirmedOrder {
   governorate: string;
   itemCount: number;
   whatsappUrl?: string;
+  customerEmail?: string;
+  emailHtml?: string;
+  emailStatus?: EmailOrderStatus;
+  mailtoUrl?: string;
 }
 
 interface CheckoutSectionProps {
   items: CartItem[];
   customer: CustomerDetails;
   lastOrder: ConfirmedOrder | null;
+  storeConfig?: StoreRuntimeConfig;
   onChangeCustomer: (next: CustomerDetails) => void;
   onUpdateQty: (key: string, delta: number) => void;
   onRemoveItem: (key: string) => void;
@@ -77,6 +88,7 @@ export function CheckoutSection({
   items,
   customer,
   lastOrder,
+  storeConfig = STORE_CONFIG,
   onChangeCustomer,
   onUpdateQty,
   onRemoveItem,
@@ -85,23 +97,35 @@ export function CheckoutSection({
   onProductsUpdated,
 }: CheckoutSectionProps) {
   const [copied, setCopied] = useState(false);
+  const [copiedHtml, setCopiedHtml] = useState(false);
+  const [emailPreviewOpen, setEmailPreviewOpen] = useState(false);
   const [submitting, setSubmitting] = useState(false);
   const [submitError, setSubmitError] = useState<string | null>(null);
   const [pendingOrderNumber, setPendingOrderNumber] = useState<string>(() => generateOrderNumber());
 
   const subtotal = items.reduce((acc, item) => acc + item.product.price * item.quantity, 0);
-  const giftWrapFee = items.length > 0 && customer.giftWrap ? GIFT_WRAP_FEE : 0;
+  const configuredGiftWrapFee = storeConfig.giftWrapFee;
+  const giftWrapFee = items.length > 0 && customer.giftWrap ? configuredGiftWrapFee : 0;
   const giftMessageText = customer.hasGiftMessage ? (customer.giftMessage || '').trim() : '';
-  const shipping = estimateShipping(subtotal, customer.governorate);
+  const shipping = estimateShipping(
+    subtotal,
+    customer.governorate,
+    storeConfig.governorates,
+    storeConfig.freeShippingThreshold
+  );
   const total = subtotal + giftWrapFee + shipping.fee;
 
   const phoneDigits = customer.phone.replace(/\D/g, '');
   const isPhoneValid = phoneDigits.length >= 10;
+  const emailValue = (customer.email || '').trim();
+  const isEmailValid = /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(emailValue);
+  const isEmailReady = !customer.sendViaEmail || isEmailValid;
   const isFormValid =
     items.length > 0 &&
     customer.name.trim().length >= 2 &&
     isPhoneValid &&
-    customer.address.trim().length >= 5;
+    customer.address.trim().length >= 5 &&
+    isEmailReady;
 
   const lines = items.map(formatCartItemForWhatsapp);
 
@@ -114,7 +138,7 @@ export function CheckoutSection({
       `رقم الطلب: #${orderNum}`,
       ...lines,
       `المجموع الفرعي: ${formatEGP(subtotal)}`,
-      ...(customer.giftWrap ? [`تغليف هدايا خاص: ${formatEGP(GIFT_WRAP_FEE)}`] : []),
+      ...(customer.giftWrap ? [`تغليف هدايا خاص: ${formatEGP(configuredGiftWrapFee)}`] : []),
       `الشحن (${shipping.governorate.name} - ${shipping.governorate.eta}): ${
         shipping.isFree ? 'مجاني' : formatEGP(shipping.fee)
       }`,
@@ -139,6 +163,17 @@ export function CheckoutSection({
     }
   };
 
+  const handleCopyEmailHtml = async () => {
+    if (!lastOrder?.emailHtml) return;
+    try {
+      await navigator.clipboard.writeText(lastOrder.emailHtml);
+      setCopiedHtml(true);
+      window.setTimeout(() => setCopiedHtml(false), 2200);
+    } catch {
+      setCopiedHtml(false);
+    }
+  };
+
   const handleConfirmClick = async () => {
     if (!isFormValid || submitting) return;
     setSubmitting(true);
@@ -153,6 +188,8 @@ export function CheckoutSection({
     const snapshotCustomer = {
       customerName: customer.name.trim(),
       phone: customer.phone.trim(),
+      customerEmail: emailValue || undefined,
+      sendViaEmail: Boolean(customer.sendViaEmail && isEmailValid),
       governorate: shipping.governorate.name,
       address: customer.address.trim(),
       notes: customer.notes.trim(),
@@ -188,6 +225,8 @@ export function CheckoutSection({
       const data = (await res.json()) as {
         order?: { orderNumber: string };
         products?: Product[];
+        emailHtml?: string;
+        emailStatus?: EmailOrderStatus;
         error?: string;
       };
 
@@ -202,7 +241,15 @@ export function CheckoutSection({
 
       const finalOrderNumber = data.order?.orderNumber || requestedOrderNumber;
       const finalMsg = buildWhatsappMessage(finalOrderNumber);
-      const finalWaUrl = `https://wa.me/${WHATSAPP_NUMBER}?text=${encodeURIComponent(finalMsg)}`;
+      const finalWaUrl = `https://wa.me/${storeConfig.whatsappNumber}?text=${encodeURIComponent(finalMsg)}`;
+      const mailtoSubject = encodeURIComponent(
+        `تأكيد طلبك #${finalOrderNumber} — M&M Candle Co.`
+      );
+      const mailtoBody = encodeURIComponent(finalMsg);
+      const mailtoUrl =
+        snapshotCustomer.sendViaEmail && snapshotCustomer.customerEmail
+          ? `mailto:${encodeURIComponent(snapshotCustomer.customerEmail)}?subject=${mailtoSubject}&body=${mailtoBody}`
+          : undefined;
 
       onConfirmOrder({
         orderNumber: finalOrderNumber,
@@ -212,6 +259,10 @@ export function CheckoutSection({
         governorate: snapshotCustomer.governorate,
         itemCount,
         whatsappUrl: customer.sendViaWhatsapp ? finalWaUrl : undefined,
+        customerEmail: snapshotCustomer.customerEmail,
+        emailHtml: data.emailHtml,
+        emailStatus: data.emailStatus,
+        mailtoUrl,
       });
 
       setPendingOrderNumber(generateOrderNumber());
@@ -243,53 +294,83 @@ export function CheckoutSection({
           طلبك جاهز للتأكيد
         </h2>
         <p className="mt-2 text-sm sm:text-base text-[#6f5a53] dark:text-[#b9a79b]">
-          أكمل بيانات التوصيل لتسجيل طلبك مباشرة في المتجر، مع إمكانية إرساله اختياريًا على واتساب.
+          أكمل بيانات التوصيل لتسجيل طلبك مباشرة في المتجر، مع إمكانية إرساله عبر البريد الإلكتروني
+          أو واتساب.
         </p>
       </div>
 
       {lastOrder && (
         <div
           role="status"
-          className="mb-8 p-5 rounded-2xl border border-[#2d7a4f]/30 bg-[#eef8f2] dark:bg-[#13261b] dark:border-[#399962]/40 flex flex-col sm:flex-row sm:items-center justify-between gap-4"
+          className="mb-8 p-5 rounded-2xl border border-[#2d7a4f]/30 bg-[#eef8f2] dark:bg-[#13261b] dark:border-[#399962]/40 space-y-3"
         >
-          <div className="flex items-start gap-3">
-            <CheckCircle2
-              className="w-5 h-5 text-[#1f6f43] dark:text-[#57c986] shrink-0 mt-0.5"
-              aria-hidden="true"
-            />
-            <div className="space-y-1">
-              <p className="text-sm font-bold text-[#154d2e] dark:text-[#b9f0cf]">
-                تم تسجيل الطلب #{lastOrder.orderNumber} في النظام بنجاح
-              </p>
-              <p className="text-xs text-[#26603f] dark:text-[#8fd3ac]">
-                باسم {lastOrder.customerName} · {lastOrder.governorate} ·{' '}
-                {lastOrder.itemCount.toLocaleString('ar-EG')} منتجات · الإجمالي{' '}
-                <span className="tabular-nums font-semibold">{formatEGP(lastOrder.total)}</span>
-              </p>
+          <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
+            <div className="flex items-start gap-3">
+              <CheckCircle2
+                className="w-5 h-5 text-[#1f6f43] dark:text-[#57c986] shrink-0 mt-0.5"
+                aria-hidden="true"
+              />
+              <div className="space-y-1">
+                <p className="text-sm font-bold text-[#154d2e] dark:text-[#b9f0cf]">
+                  تم تسجيل الطلب #{lastOrder.orderNumber} في النظام بنجاح
+                </p>
+                <p className="text-xs text-[#26603f] dark:text-[#8fd3ac]">
+                  باسم {lastOrder.customerName} · {lastOrder.governorate} ·{' '}
+                  {lastOrder.itemCount.toLocaleString('ar-EG')} منتجات · الإجمالي{' '}
+                  <span className="tabular-nums font-semibold">{formatEGP(lastOrder.total)}</span>
+                </p>
+              </div>
+            </div>
+            <div className="flex flex-wrap items-center gap-2.5 shrink-0">
+              {lastOrder.emailHtml && (
+                <button
+                  type="button"
+                  onClick={() => setEmailPreviewOpen(true)}
+                  className="px-3.5 py-2 rounded-full bg-[#9b3046] hover:bg-[#822639] text-white text-xs font-bold inline-flex items-center gap-1.5 cursor-pointer whitespace-nowrap"
+                >
+                  <Mail className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>معاينة رسالة البريد الإلكتروني</span>
+                </button>
+              )}
+              {lastOrder.whatsappUrl && (
+                <a
+                  href={lastOrder.whatsappUrl}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="px-3.5 py-2 rounded-full bg-[#1f8a4c] hover:bg-[#19723e] text-white text-xs font-bold inline-flex items-center gap-1.5 whitespace-nowrap"
+                >
+                  <MessageCircle className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>فتح رسالة واتساب</span>
+                </a>
+              )}
+              <a
+                href="#track"
+                className="text-xs font-bold text-[#154d2e] dark:text-[#b9f0cf] underline underline-offset-4 whitespace-nowrap"
+              >
+                تتبع حالة الطلب
+              </a>
+              <span className="text-xs font-medium text-[#26603f] dark:text-[#8fd3ac] whitespace-nowrap">
+                الساعة {lastOrder.createdAt}
+              </span>
             </div>
           </div>
-          <div className="flex flex-wrap items-center gap-3 shrink-0">
-            {lastOrder.whatsappUrl && (
-              <a
-                href={lastOrder.whatsappUrl}
-                target="_blank"
-                rel="noopener noreferrer"
-                className="px-3.5 py-2 rounded-full bg-[#1f8a4c] hover:bg-[#19723e] text-white text-xs font-bold inline-flex items-center gap-1.5 whitespace-nowrap"
-              >
-                <MessageCircle className="w-3.5 h-3.5" aria-hidden="true" />
-                <span>فتح رسالة واتساب</span>
-              </a>
-            )}
-            <a
-              href="#track"
-              className="text-xs font-bold text-[#154d2e] dark:text-[#b9f0cf] underline underline-offset-4 whitespace-nowrap"
-            >
-              تتبع حالة الطلب
-            </a>
-            <span className="text-xs font-medium text-[#26603f] dark:text-[#8fd3ac] whitespace-nowrap">
-              الساعة {lastOrder.createdAt}
-            </span>
-          </div>
+
+          {lastOrder.emailStatus?.requested && lastOrder.emailStatus.message && (
+            <div className="pt-2 border-t border-[#2d7a4f]/20 flex flex-wrap items-center justify-between gap-2 text-xs text-[#154d2e] dark:text-[#b9f0cf]">
+              <span>
+                <strong>البريد الإلكتروني:</strong> {lastOrder.emailStatus.message}
+              </span>
+              {lastOrder.mailtoUrl && (
+                <a
+                  href={lastOrder.mailtoUrl}
+                  className="inline-flex items-center gap-1 font-bold underline underline-offset-4 whitespace-nowrap"
+                >
+                  <ExternalLink className="w-3.5 h-3.5" aria-hidden="true" />
+                  <span>فتح في تطبيق البريد</span>
+                </a>
+              )}
+            </div>
+          )}
         </div>
       )}
 
@@ -311,7 +392,7 @@ export function CheckoutSection({
                 لسه ما اخترتش حاجة.
               </p>
               <p className="text-xs text-[#7a655f] dark:text-[#b9a79b]">
-                أضف منتجًا من القائمة بالأعلى لعرض التكلفة وتجهيز رسالة واتساب.
+                أضف منتجًا من القائمة بالأعلى لعرض التكلفة وتأكيد طلبك.
               </p>
             </div>
           ) : (
@@ -328,7 +409,8 @@ export function CheckoutSection({
                       </p>
                       {item.customDetails?.kind === 'perfume' ? (
                         <p className="text-xs text-[#7a655f] dark:text-[#b9a79b]">
-                          العطر: {item.customDetails.scentName} · الاسم: {item.customDetails.bottleName} ·{' '}
+                          العطر: {item.customDetails.scentName} · الاسم:{' '}
+                          {item.customDetails.bottleName} ·{' '}
                           <span className="tabular-nums">{formatEGP(item.product.price)}</span>
                         </p>
                       ) : item.customDetails?.kind === 'candle' ? (
@@ -392,7 +474,7 @@ export function CheckoutSection({
             {customer.giftWrap && (
               <div className="flex justify-between text-[#9b3046] dark:text-[#d4aa63]">
                 <span>تغليف هدايا خاص</span>
-                <span className="tabular-nums font-medium">{formatEGP(GIFT_WRAP_FEE)}</span>
+                <span className="tabular-nums font-medium">{formatEGP(configuredGiftWrapFee)}</span>
               </div>
             )}
             <div className="flex justify-between text-[#6f5a53] dark:text-[#b9a79b]">
@@ -416,7 +498,8 @@ export function CheckoutSection({
               </span>
             </div>
             <p className="text-xs text-[#7a655f] dark:text-[#b9a79b]">
-              شحن مجاني للطلبات من {formatEGP(FREE_SHIPPING_THRESHOLD)} فأكثر · الدفع عند الاستلام متاح.
+              شحن مجاني للطلبات من {formatEGP(storeConfig.freeShippingThreshold)} فأكثر · الدفع عند
+              الاستلام متاح.
             </p>
           </div>
         </div>
@@ -482,7 +565,7 @@ export function CheckoutSection({
                 onChange={(e) => onChangeCustomer({ ...customer, governorate: e.target.value })}
                 className="w-full px-3.5 py-2.5 min-h-[44px] rounded-xl border border-[#e8dccd] dark:border-[#3a2b26] bg-[#faf6f0] dark:bg-[#16100e] text-[#2a1a17] dark:text-[#f3e9df] text-sm focus:outline-none focus:border-[#b98a3e]"
               >
-                {GOVERNORATES.map((g) => (
+                {storeConfig.governorates.map((g) => (
                   <option key={g.name} value={g.name}>
                     {g.name} — {formatEGP(g.fee)} ({g.eta})
                   </option>
@@ -575,7 +658,7 @@ export function CheckoutSection({
                 />
                 <span className="text-xs leading-relaxed">
                   <strong className="block text-[#2a1a17] dark:text-[#f3e9df]">
-                    تغليف هدايا خاص (+ {formatEGP(GIFT_WRAP_FEE)})
+                    تغليف هدايا خاص (+ {formatEGP(configuredGiftWrapFee)})
                   </strong>
                   <span className="text-[#7a655f] dark:text-[#b9a79b]">
                     علبة هدايا فاخرة وشريط ساتان نبيذي
@@ -652,6 +735,55 @@ export function CheckoutSection({
               <p className="text-xs text-[#7a655f] dark:text-[#b9a79b]">
                 متاح شحن مجاني عند إضافة منتجات بقيمة {formatEGP(shipping.remainingForFree)} إضافية.
               </p>
+            )}
+          </div>
+
+          {/* Optional Email Order Confirmation Checkbox + Input */}
+          <div className="rounded-xl border border-[#e8dccd] dark:border-[#3a2b26] bg-[#faf6f0] dark:bg-[#16100e] p-4 space-y-3">
+            <label className="flex items-start gap-3 cursor-pointer">
+              <input
+                type="checkbox"
+                checked={Boolean(customer.sendViaEmail)}
+                onChange={(e) =>
+                  onChangeCustomer({ ...customer, sendViaEmail: e.target.checked })
+                }
+                className="mt-0.5 w-4 h-4 accent-[#9b3046] cursor-pointer shrink-0"
+              />
+              <span className="text-xs sm:text-sm leading-relaxed">
+                <strong className="inline-flex items-center gap-1.5 text-[#2a1a17] dark:text-[#f3e9df]">
+                  <Mail className="w-4 h-4 text-[#9b3046] dark:text-[#d4aa63]" aria-hidden="true" />
+                  <span>إرسال تفاصيل الطلب عبر البريد الإلكتروني</span>
+                </strong>
+                <span className="block text-xs text-[#7a655f] dark:text-[#b9a79b] mt-0.5">
+                  احصل على رسالة تأكيد أنيقة تتضمن شعار المتجر وفاتورة طلبك الكاملة.
+                </span>
+              </span>
+            </label>
+
+            {customer.sendViaEmail && (
+              <div>
+                <label
+                  htmlFor="cust-email"
+                  className="block text-xs font-semibold text-[#2a1a17] dark:text-[#f3e9df] mb-1.5"
+                >
+                  البريد الإلكتروني للعميل
+                </label>
+                <input
+                  id="cust-email"
+                  type="email"
+                  dir="ltr"
+                  autoComplete="email"
+                  placeholder="name@example.com"
+                  value={customer.email || ''}
+                  onChange={(e) => onChangeCustomer({ ...customer, email: e.target.value })}
+                  className="w-full px-3.5 py-2.5 min-h-[42px] rounded-xl border border-[#e8dccd] dark:border-[#3a2b26] bg-[#fffdf9] dark:bg-[#211815] text-[#2a1a17] dark:text-[#f3e9df] text-sm text-right focus:outline-none focus:border-[#b98a3e]"
+                />
+                {!isEmailValid && (
+                  <p className="mt-1 text-xs text-[#9b3046] dark:text-[#e07a8e]">
+                    يرجى إدخال بريد إلكتروني صحيح لإرسال تفاصيل الطلب.
+                  </p>
+                )}
+              </div>
             )}
           </div>
 
@@ -741,6 +873,74 @@ export function CheckoutSection({
           </p>
         </div>
       </div>
+
+      {/* Branded HTML Email Preview Modal */}
+      {emailPreviewOpen && lastOrder?.emailHtml && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center p-4 bg-black/65 backdrop-blur-xs"
+          onClick={() => setEmailPreviewOpen(false)}
+          role="dialog"
+          aria-modal="true"
+          aria-label="معاينة رسالة تأكيد الطلب بالبريد الإلكتروني"
+        >
+          <div
+            className="w-full max-w-2xl max-h-[90vh] rounded-2xl bg-[#fffdf9] dark:bg-[#211815] border border-[#e8dccd] dark:border-[#3a2b26] shadow-2xl flex flex-col overflow-hidden"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="px-5 py-4 border-b border-[#e8dccd] dark:border-[#3a2b26] flex items-center justify-between gap-3">
+              <div className="flex items-center gap-2">
+                <Mail className="w-4 h-4 text-[#9b3046] dark:text-[#d4aa63]" aria-hidden="true" />
+                <div>
+                  <h3 className="text-sm sm:text-base font-bold text-[#2a1a17] dark:text-[#f3e9df]">
+                    رسالة تأكيد الطلب #{lastOrder.orderNumber}
+                  </h3>
+                  {lastOrder.customerEmail && (
+                    <p dir="ltr" className="text-xs text-[#7a655f] dark:text-[#b9a79b] text-right">
+                      إلى: {lastOrder.customerEmail}
+                    </p>
+                  )}
+                </div>
+              </div>
+
+              <div className="flex items-center gap-2">
+                <button
+                  type="button"
+                  onClick={() => void handleCopyEmailHtml()}
+                  className="px-3 py-1.5 rounded-lg border border-[#e8dccd] dark:border-[#3a2b26] text-xs font-semibold inline-flex items-center gap-1.5 hover:border-[#b98a3e] cursor-pointer"
+                >
+                  {copiedHtml ? (
+                    <>
+                      <Check className="w-3.5 h-3.5 text-[#1f8a4c]" />
+                      <span>تم نسخ HTML</span>
+                    </>
+                  ) : (
+                    <>
+                      <Copy className="w-3.5 h-3.5" />
+                      <span>نسخ كود الرسالة</span>
+                    </>
+                  )}
+                </button>
+                <button
+                  type="button"
+                  onClick={() => setEmailPreviewOpen(false)}
+                  aria-label="إغلاق المعاينة"
+                  className="w-9 h-9 rounded-full border border-[#e8dccd] dark:border-[#3a2b26] flex items-center justify-center cursor-pointer"
+                >
+                  <X className="w-4 h-4" />
+                </button>
+              </div>
+            </div>
+
+            <div className="flex-1 overflow-hidden bg-[#faf6f0]">
+              <iframe
+                title={`معاينة بريد الطلب #${lastOrder.orderNumber}`}
+                srcDoc={lastOrder.emailHtml}
+                className="w-full h-[65vh] border-0"
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </section>
   );
 }

@@ -1,5 +1,5 @@
 import { useEffect, useState } from 'react';
-import { Minus, Plus, X, Check, Flame, Leaf, ShieldAlert } from 'lucide-react';
+import { Minus, Plus, X, Check, Flame, Leaf, ShieldAlert, Heart } from 'lucide-react';
 import {
   LOW_STOCK_THRESHOLD,
   formatEGP,
@@ -15,6 +15,9 @@ interface ProductDetailModalProps {
   ratingSummary?: { average: number; count: number };
   seasonalOffer?: SeasonalOffer | null;
   nowMs?: number;
+  lowStockThreshold?: number;
+  isFavorite?: boolean;
+  onToggleFavorite?: (productId: number) => void;
   onClose: () => void;
   onAddToCart: (product: Product, scent: string, quantity: number) => void;
 }
@@ -99,6 +102,9 @@ export function ProductDetailModal({
   ratingSummary,
   seasonalOffer,
   nowMs,
+  lowStockThreshold = LOW_STOCK_THRESHOLD,
+  isFavorite = false,
+  onToggleFavorite,
   onClose,
   onAddToCart,
 }: ProductDetailModalProps) {
@@ -128,7 +134,7 @@ export function ProductDetailModal({
   const avg = ratingSummary?.average ?? product.rating;
   const count = ratingSummary?.count ?? product.reviewCount;
   const isOutOfStock = product.stock <= 0;
-  const isLowStock = product.stock > 0 && product.stock <= LOW_STOCK_THRESHOLD;
+  const isLowStock = product.stock > 0 && product.stock <= lowStockThreshold;
   const pricing = getProductPricing(product, seasonalOffer, nowMs);
   const composition = getProductComposition(product);
 
@@ -144,14 +150,31 @@ export function ProductDetailModal({
         className="relative w-full max-w-3xl max-h-[90vh] rounded-2xl bg-[#fffdf9] dark:bg-[#211815] border border-[#e8dccd] dark:border-[#3a2b26] shadow-2xl overflow-y-auto md:overflow-hidden grid grid-cols-1 md:grid-cols-2"
         onClick={(e) => e.stopPropagation()}
       >
-        <button
-          type="button"
-          onClick={onClose}
-          aria-label="إغلاق النافذة"
-          className="absolute top-3 left-3 z-10 w-10 h-10 rounded-full bg-[#faf6f0]/90 dark:bg-[#16100e]/90 border border-[#e8dccd] dark:border-[#3a2b26] text-[#2a1a17] dark:text-[#f3e9df] flex items-center justify-center hover:bg-[#efe4d4] dark:hover:bg-[#322420] cursor-pointer focus-visible:outline-2 focus-visible:outline-[#b98a3e]"
-        >
-          <X className="w-5 h-5" />
-        </button>
+        <div className="absolute top-3 left-3 z-10 flex items-center gap-2">
+          {onToggleFavorite && (
+            <button
+              type="button"
+              onClick={() => onToggleFavorite(product.id)}
+              aria-label={isFavorite ? 'إزالة من المفضلة' : 'أضف للمفضلة'}
+              aria-pressed={isFavorite}
+              className={`w-10 h-10 rounded-full border flex items-center justify-center transition-colors cursor-pointer ${
+                isFavorite
+                  ? 'bg-[#9b3046] border-[#9b3046] text-white'
+                  : 'bg-[#faf6f0]/90 dark:bg-[#16100e]/90 border-[#e8dccd] dark:border-[#3a2b26] text-[#5c4943] dark:text-[#b9a79b] hover:text-[#9b3046]'
+              }`}
+            >
+              <Heart className={`w-4 h-4 ${isFavorite ? 'fill-current' : ''}`} />
+            </button>
+          )}
+          <button
+            type="button"
+            onClick={onClose}
+            aria-label="إغلاق النافذة"
+            className="w-10 h-10 rounded-full bg-[#faf6f0]/90 dark:bg-[#16100e]/90 border border-[#e8dccd] dark:border-[#3a2b26] text-[#2a1a17] dark:text-[#f3e9df] flex items-center justify-center hover:bg-[#efe4d4] dark:hover:bg-[#322420] cursor-pointer focus-visible:outline-2 focus-visible:outline-[#b98a3e]"
+          >
+            <X className="w-5 h-5" />
+          </button>
+        </div>
 
         <div className="aspect-[4/3] md:aspect-auto md:min-h-[420px] bg-[#f4ece0] dark:bg-[#271d1a]">
           <ProductArtwork product={product} />

@@ -3,6 +3,8 @@ import fs from 'node:fs';
 import path from 'node:path';
 import dotenv from 'dotenv';
 import express, { type NextFunction, type Request, type Response } from 'express';
+import nodemailer from 'nodemailer';
+import { STORE_CONFIG, type StoreRuntimeConfig } from './src/config.ts';
 
 dotenv.config();
 
@@ -49,6 +51,9 @@ interface StoreOrder {
   orderNumber: string;
   customerName: string;
   phone: string;
+  customerEmail?: string;
+  sendViaEmail?: boolean;
+  emailSent?: boolean;
   governorate: string;
   address: string;
   notes: string;
@@ -64,6 +69,7 @@ interface StoreOrder {
   status: OrderStatus;
   stockDeducted?: boolean;
   createdAt: string;
+  createdAtISO?: string;
   updatedAt: string;
 }
 
@@ -102,9 +108,10 @@ interface StoreData {
   scentPoll: ScentPollOption[];
   seasonalOffer: SeasonalOffer;
   notifications: AdminNotification[];
+  storeConfig: StoreRuntimeConfig;
 }
 
-const LOW_STOCK_THRESHOLD = 5;
+const DEFAULT_LOW_STOCK_THRESHOLD = STORE_CONFIG.lowStockThreshold;
 const VALID_STATUSES: OrderStatus[] = [
   'جديد',
   'مقبول',
@@ -313,6 +320,95 @@ const DATA_DIR = path.resolve(process.cwd(), 'data');
 const DATA_FILE = path.join(DATA_DIR, 'store.json');
 const UPLOADS_DIR = path.join(DATA_DIR, 'uploads');
 
+function cloneDefaultStoreConfig(): StoreRuntimeConfig {
+  return JSON.parse(JSON.stringify(STORE_CONFIG)) as StoreRuntimeConfig;
+}
+
+function mergeStoreConfig(raw?: Partial<StoreRuntimeConfig> | null): StoreRuntimeConfig {
+  const defaults = cloneDefaultStoreConfig();
+  if (!raw || typeof raw !== 'object') return defaults;
+
+  return {
+    whatsappNumber:
+      typeof raw.whatsappNumber === 'string' && raw.whatsappNumber.trim()
+        ? raw.whatsappNumber.replace(/\D/g, '') || defaults.whatsappNumber
+        : defaults.whatsappNumber,
+    lowStockThreshold:
+      typeof raw.lowStockThreshold === 'number' && Number.isFinite(raw.lowStockThreshold) && raw.lowStockThreshold >= 0
+        ? Math.round(raw.lowStockThreshold)
+        : defaults.lowStockThreshold,
+    freeShippingThreshold:
+      typeof raw.freeShippingThreshold === 'number' && Number.isFinite(raw.freeShippingThreshold) && raw.freeShippingThreshold >= 0
+        ? Math.round(raw.freeShippingThreshold)
+        : defaults.freeShippingThreshold,
+    giftWrapFee:
+      typeof raw.giftWrapFee === 'number' && Number.isFinite(raw.giftWrapFee) && raw.giftWrapFee >= 0
+        ? Math.round(raw.giftWrapFee)
+        : defaults.giftWrapFee,
+    governorates:
+      Array.isArray(raw.governorates) && raw.governorates.length > 0
+        ? raw.governorates.map((g) => ({
+            name: String(g.name || '').trim() || 'منطقة غير محددة',
+            zone: String(g.zone || '').trim() || 'مصر',
+            fee: Math.max(0, Math.round(Number(g.fee) || 0)),
+            eta: String(g.eta || '').trim() || '٢ - ٣ أيام عمل',
+          }))
+        : defaults.governorates,
+    customPerfume: {
+      sizes:
+        Array.isArray(raw.customPerfume?.sizes) && raw.customPerfume.sizes.length > 0
+          ? raw.customPerfume.sizes.map((s, idx) => ({
+              id: String(s.id || `size-${idx}`).trim(),
+              ml: Math.max(5, Math.round(Number(s.ml) || 50)),
+              label: String(s.label || `${s.ml || 50} مل`).trim(),
+              price: Math.max(1, Math.round(Number(s.price) || 250)),
+              description: String(s.description || '').trim(),
+            }))
+          : defaults.customPerfume.sizes,
+      suggestedScents:
+        Array.isArray(raw.customPerfume?.suggestedScents) &&
+        raw.customPerfume.suggestedScents.length > 0
+          ? raw.customPerfume.suggestedScents.map((s) => String(s).trim()).filter(Boolean)
+          : defaults.customPerfume.suggestedScents,
+    },
+    customCandle: {
+      sizes:
+        Array.isArray(raw.customCandle?.sizes) && raw.customCandle.sizes.length > 0
+          ? raw.customCandle.sizes.map((s, idx) => ({
+              id: String(s.id || `csize-${idx}`).trim(),
+              label: String(s.label || 'حجم').trim(),
+              weight: String(s.weight || '٢٠٠ جم').trim(),
+              burnTime: String(s.burnTime || 'حتى ٤٠ ساعة').trim(),
+              price: Math.max(1, Math.round(Number(s.price) || 180)),
+            }))
+          : defaults.customCandle.sizes,
+      colors:
+        Array.isArray(raw.customCandle?.colors) && raw.customCandle.colors.length > 0
+          ? raw.customCandle.colors.map((c, idx) => ({
+              id: String(c.id || `color-${idx}`).trim(),
+              label: String(c.label || 'لون').trim(),
+              hex: /^#[0-9a-fA-F]{3,8}$/.test(String(c.hex || '').trim())
+                ? String(c.hex).trim()
+                : '#f7efe3',
+            }))
+          : defaults.customCandle.colors,
+      scents:
+        Array.isArray(raw.customCandle?.scents) && raw.customCandle.scents.length > 0
+          ? raw.customCandle.scents.map((s) => String(s).trim()).filter(Boolean)
+          : defaults.customCandle.scents,
+      jarTypes:
+        Array.isArray(raw.customCandle?.jarTypes) && raw.customCandle.jarTypes.length > 0
+          ? raw.customCandle.jarTypes.map((j, idx) => ({
+              id: String(j.id || `jar-${idx}`).trim(),
+              label: String(j.label || 'سادة').trim(),
+              extraPrice: Math.max(0, Math.round(Number(j.extraPrice) || 0)),
+              description: String(j.description || '').trim(),
+            }))
+          : defaults.customCandle.jarTypes,
+    },
+  };
+}
+
 // ---------------------------------------------------------------------------
 // طبقة التخزين: Supabase (دائم) أو ملف محلي (للتجربة على الجهاز فقط)
 // ---------------------------------------------------------------------------
@@ -336,6 +432,7 @@ function defaultStore(): StoreData {
     scentPoll: INITIAL_SCENT_POLL,
     seasonalOffer: INITIAL_SEASONAL_OFFER,
     notifications: [],
+    storeConfig: cloneDefaultStoreConfig(),
   };
 }
 
@@ -363,7 +460,8 @@ function normalizeStore(parsed: Partial<StoreData>): StoreData {
       ? parsed.seasonalOffer
       : INITIAL_SEASONAL_OFFER;
   const notifications = Array.isArray(parsed.notifications) ? parsed.notifications : [];
-  return { products, orders, scentPoll, seasonalOffer, notifications };
+  const storeConfig = mergeStoreConfig(parsed.storeConfig);
+  return { products, orders, scentPoll, seasonalOffer, notifications, storeConfig };
 }
 
 function readLocalStore(): StoreData | null {
@@ -419,6 +517,8 @@ async function initStore(): Promise<void> {
   const rows = (await res.json()) as Array<{ data: Partial<StoreData> }>;
   if (rows.length > 0 && rows[0].data) {
     storeCache = normalizeStore(rows[0].data);
+    // نحفظ النسخة المطبّعة عشان الحقول الجديدة (زي storeConfig) تتضاف للداتا القديمة
+    await sbUpsertStore(storeCache);
     console.log('Storage: Supabase (loaded existing data)');
   } else {
     storeCache = readLocalStore() ?? defaultStore();
@@ -527,6 +627,235 @@ function formatArabicTimestamp(): string {
   });
 }
 
+function escapeHtml(text: string): string {
+  return text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
+}
+
+function formatOrderEmailEGP(amount: number): string {
+  return `${Math.round(amount).toLocaleString('ar-EG')} ج.م`;
+}
+
+function buildOrderConfirmationEmailHtml(order: StoreOrder, logoUrl: string): string {
+  const itemRowsHtml = order.items
+    .map((item) => {
+      const custom = item.customDetails as
+        | {
+            kind?: string;
+            scentName?: string;
+            bottleName?: string;
+            sizeLabel?: string;
+            sizeWeight?: string;
+            colorLabel?: string;
+            scent?: string;
+            jarType?: string;
+          }
+        | undefined;
+      let specText = item.scent ? `الرائحة: ${escapeHtml(item.scent)}` : '';
+      if (custom?.kind === 'perfume') {
+        specText = `العطر: ${escapeHtml(String(custom.scentName || ''))} · الاسم على الزجاجة: ${escapeHtml(String(custom.bottleName || ''))} · الحجم: ${escapeHtml(String(custom.sizeLabel || ''))}`;
+      } else if (custom?.kind === 'candle') {
+        specText = `الحجم: ${escapeHtml(String(custom.sizeLabel || ''))} (${escapeHtml(String(custom.sizeWeight || ''))}) · اللون: ${escapeHtml(String(custom.colorLabel || ''))} · الجار: ${escapeHtml(String(custom.jarType || ''))} · الرائحة: ${escapeHtml(String(custom.scent || ''))}`;
+      }
+
+      return `
+        <tr>
+          <td style="padding:14px 12px;border-bottom:1px solid #eadfd1;text-align:right;">
+            <div style="font-weight:700;color:#2a1a17;font-size:14px;">${escapeHtml(item.name)}</div>
+            ${specText ? `<div style="color:#6f5a53;font-size:12px;margin-top:4px;">${specText}</div>` : ''}
+          </td>
+          <td style="padding:14px 10px;border-bottom:1px solid #eadfd1;text-align:center;color:#2a1a17;font-weight:600;font-size:13px;">
+            ${item.quantity.toLocaleString('ar-EG')}
+          </td>
+          <td style="padding:14px 12px;border-bottom:1px solid #eadfd1;text-align:left;color:#9e732b;font-weight:700;font-size:13px;white-space:nowrap;">
+            ${formatOrderEmailEGP(item.price * item.quantity)}
+          </td>
+        </tr>
+      `;
+    })
+    .join('');
+
+  const paymentLabel =
+    order.paymentMethod === 'wallet' ? 'تحويل محفظة إلكترونية' : 'الدفع نقدًا عند الاستلام';
+
+  return `<!doctype html>
+<html lang="ar" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<title>تأكيد الطلب #${escapeHtml(order.orderNumber)} — M&amp;M Candle Co.</title>
+</head>
+<body style="margin:0;padding:24px 12px;background-color:#faf6f0;font-family:'Cairo',Tahoma,Arial,sans-serif;color:#2a1a17;">
+  <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="max-width:620px;margin:0 auto;background-color:#fffdf9;border:1px solid #e8dccd;border-radius:18px;overflow:hidden;">
+    <tr>
+      <td style="background:linear-gradient(135deg,#3d1c23 0%,#1c110f 65%,#2a2013 100%);padding:28px 24px;text-align:center;color:#faf4eb;">
+        <img src="${escapeHtml(logoUrl)}" alt="شعار M&amp;M Candle Co." width="84" height="84" style="display:block;margin:0 auto 14px;border-radius:16px;border:2px solid rgba(212,170,99,0.55);object-fit:cover;" />
+        <p style="margin:0 0 6px;font-size:11px;letter-spacing:2px;color:#d4aa63;font-weight:700;">M&amp;M CANDLE CO.</p>
+        <h1 style="margin:0;font-size:22px;font-weight:700;color:#faf4eb;">تم استلام طلبك بنجاح</h1>
+        <p style="margin:8px 0 0;font-size:13px;color:#dfd1c3;">شموع ومعطرات يدوية مصنوعة بحب لتضيء لحظاتك</p>
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:24px;">
+        <div style="background-color:#faf6f0;border:1px solid #e8dccd;border-radius:12px;padding:14px 16px;margin-bottom:20px;">
+          <table role="presentation" width="100%" cellspacing="0" cellpadding="0">
+            <tr>
+              <td style="font-size:13px;color:#6f5a53;">رقم الطلب: <strong style="color:#9b3046;font-size:15px;">#${escapeHtml(order.orderNumber)}</strong></td>
+              <td style="font-size:12px;color:#6f5a53;text-align:left;">${escapeHtml(order.createdAt)}</td>
+            </tr>
+          </table>
+        </div>
+
+        <p style="margin:0 0 16px;font-size:14px;line-height:1.7;color:#2a1a17;">
+          أهلًا <strong>${escapeHtml(order.customerName)}</strong>، شكرًا لاختيارك <strong>M&amp;M Candle Co.</strong>. هذه تفاصيل طلبك المسجل لدينا:
+        </p>
+
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="border-collapse:collapse;border:1px solid #e8dccd;border-radius:12px;overflow:hidden;margin-bottom:20px;">
+          <thead>
+            <tr style="background-color:#f4ece0;color:#5c4943;font-size:12px;">
+              <th style="padding:10px 12px;text-align:right;">المنتج والمواصفات</th>
+              <th style="padding:10px 10px;text-align:center;">الكمية</th>
+              <th style="padding:10px 12px;text-align:left;">السعر</th>
+            </tr>
+          </thead>
+          <tbody>
+            ${itemRowsHtml}
+          </tbody>
+        </table>
+
+        <table role="presentation" width="100%" cellspacing="0" cellpadding="0" style="background-color:#faf6f0;border:1px solid #e8dccd;border-radius:12px;padding:14px 16px;margin-bottom:20px;font-size:13px;">
+          <tr>
+            <td style="padding:4px 0;color:#6f5a53;">المجموع الفرعي</td>
+            <td style="padding:4px 0;text-align:left;font-weight:600;">${formatOrderEmailEGP(order.subtotal)}</td>
+          </tr>
+          ${
+            order.giftWrap && (order.giftWrapFee || 0) > 0
+              ? `<tr>
+                  <td style="padding:4px 0;color:#9b3046;">تغليف هدايا خاص</td>
+                  <td style="padding:4px 0;text-align:left;font-weight:600;color:#9b3046;">${formatOrderEmailEGP(order.giftWrapFee || 0)}</td>
+                </tr>`
+              : ''
+          }
+          <tr>
+            <td style="padding:4px 0;color:#6f5a53;">تكلفة الشحن (${escapeHtml(order.governorate)})</td>
+            <td style="padding:4px 0;text-align:left;font-weight:600;">${order.shippingFee === 0 ? 'مجاني' : formatOrderEmailEGP(order.shippingFee)}</td>
+          </tr>
+          <tr>
+            <td style="padding:10px 0 2px;border-top:1px solid #e8dccd;font-weight:700;font-size:15px;color:#2a1a17;">الإجمالي النهائي</td>
+            <td style="padding:10px 0 2px;border-top:1px solid #e8dccd;text-align:left;font-weight:700;font-size:16px;color:#9e732b;">${formatOrderEmailEGP(order.total)}</td>
+          </tr>
+        </table>
+
+        <div style="border:1px solid #e8dccd;border-radius:12px;padding:14px 16px;font-size:13px;line-height:1.8;color:#5c4943;">
+          <div><strong style="color:#2a1a17;">عنوان التوصيل:</strong> ${escapeHtml(order.governorate)}${order.address ? ` — ${escapeHtml(order.address)}` : ''}</div>
+          <div><strong style="color:#2a1a17;">رقم الموبايل:</strong> <span dir="ltr">${escapeHtml(order.phone)}</span></div>
+          <div><strong style="color:#2a1a17;">طريقة الدفع:</strong> ${escapeHtml(paymentLabel)}</div>
+          ${order.giftMessage ? `<div><strong style="color:#9b3046;">رسالة الإهداء:</strong> «${escapeHtml(order.giftMessage)}»</div>` : ''}
+          ${order.notes ? `<div><strong style="color:#2a1a17;">ملاحظات التوصيل:</strong> ${escapeHtml(order.notes)}</div>` : ''}
+        </div>
+
+        <p style="margin:20px 0 0;font-size:12px;color:#7a655f;text-align:center;">
+          يمكنك متابعة حالة طلبك في أي وقت من قسم «تتبع الطلب» على الموقع باستخدام الرقم <strong>#${escapeHtml(order.orderNumber)}</strong>.
+        </p>
+      </td>
+    </tr>
+    <tr>
+      <td style="background-color:#f4ece0;padding:14px 20px;text-align:center;font-size:11px;color:#7a655f;border-top:1px solid #e8dccd;">
+        M&amp;M Candle Co. · القاهرة، مصر · شكرًا لدعمكم الحرف اليدوية
+      </td>
+    </tr>
+  </table>
+</body>
+</html>`;
+}
+
+async function tryDispatchOrderEmail(
+  recipient: string,
+  subject: string,
+  html: string
+): Promise<{ sent: boolean; providerConfigured: boolean; message: string }> {
+  const smtpHost = (process.env.SMTP_HOST || '').trim();
+  const smtpUser = (process.env.SMTP_USER || '').trim();
+  const smtpPass = (process.env.SMTP_PASS || '').trim();
+  const smtpPort = Number(process.env.SMTP_PORT || 587) || 587;
+  const smtpFrom = (process.env.SMTP_FROM || smtpUser || 'M&M Candle Co. <orders@mmcandle.local>').trim();
+
+  if (smtpHost && smtpUser && smtpPass) {
+    try {
+      const transporter = nodemailer.createTransport({
+        host: smtpHost,
+        port: smtpPort,
+        secure: smtpPort === 465,
+        auth: { user: smtpUser, pass: smtpPass },
+      });
+      await transporter.sendMail({
+        from: smtpFrom,
+        to: recipient,
+        subject,
+        html,
+      });
+      return {
+        sent: true,
+        providerConfigured: true,
+        message: `تم إرسال تفاصيل الطلب بنجاح إلى ${recipient}.`,
+      };
+    } catch {
+      return {
+        sent: false,
+        providerConfigured: true,
+        message: 'تعذر الإرسال عبر خادم البريد حاليًا، ولكن تم تجهيز نسخة الرسالة لمعاينتها فورًا.',
+      };
+    }
+  }
+
+  const resendKey = (process.env.RESEND_API_KEY || '').trim();
+  if (resendKey) {
+    try {
+      const r = await fetch('https://api.resend.com/emails', {
+        method: 'POST',
+        headers: {
+          Authorization: `Bearer ${resendKey}`,
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify({
+          from: smtpFrom,
+          to: [recipient],
+          subject,
+          html,
+        }),
+      });
+      if (r.ok) {
+        return {
+          sent: true,
+          providerConfigured: true,
+          message: `تم إرسال تفاصيل الطلب بنجاح إلى ${recipient}.`,
+        };
+      }
+      return {
+        sent: false,
+        providerConfigured: true,
+        message: 'تعذر الإرسال عبر خدمة البريد حاليًا، وتم تجهيز نسخة الرسالة للمعاينة.',
+      };
+    } catch {
+      return {
+        sent: false,
+        providerConfigured: true,
+        message: 'تعذر الإرسال عبر خدمة البريد حاليًا، وتم تجهيز نسخة الرسالة للمعاينة.',
+      };
+    }
+  }
+
+  return {
+    sent: false,
+    providerConfigured: false,
+    message:
+      'تم تجهيز رسالة البريد الإلكتروني المصممة بشعار المتجر؛ يمكنك معاينتها أو إرسالها من تطبيق البريد لعدم تفعيل مزود SMTP على الخادم.',
+  };
+}
+
 async function startServer() {
   await initStore();
   const app = express();
@@ -536,10 +865,21 @@ async function startServer() {
   });
   app.use('/api/uploads', express.static(UPLOADS_DIR));
 
-  // Public: list products + active seasonal offer
+  // Public: list products + active seasonal offer + runtime store config + poll
   app.get('/api/products', (_req, res) => {
     const data = ensureStoreFile();
-    res.json({ products: data.products, seasonalOffer: data.seasonalOffer });
+    res.json({
+      products: data.products,
+      seasonalOffer: data.seasonalOffer,
+      storeConfig: data.storeConfig,
+      scentPoll: data.scentPoll,
+    });
+  });
+
+  // Public: get runtime store configuration (custom prices, shipping, thresholds)
+  app.get('/api/store-config', (_req, res) => {
+    const data = ensureStoreFile();
+    res.json({ storeConfig: data.storeConfig });
   });
 
   // Public: get seasonal offer
@@ -549,8 +889,11 @@ async function startServer() {
   });
 
   // Public: confirm/register order in store confirmed orders list
-  app.post('/api/orders', (req, res) => {
-    const body = req.body as Partial<StoreOrder>;
+  app.post('/api/orders', async (req, res) => {
+    const body = req.body as Partial<StoreOrder> & {
+      customerEmail?: string;
+      sendViaEmail?: boolean;
+    };
     if (
       !body ||
       typeof body.customerName !== 'string' ||
@@ -565,6 +908,7 @@ async function startServer() {
     }
 
     const data = ensureStoreFile();
+    const lowStockThreshold = data.storeConfig.lowStockThreshold ?? DEFAULT_LOW_STOCK_THRESHOLD;
     const safeItems: OrderLineItem[] = body.items.slice(0, 30).map((item) => ({
       productId: Number(item.productId) || 0,
       name: String(item.name || '').trim().slice(0, 140),
@@ -612,10 +956,17 @@ async function startServer() {
     }
 
     const now = formatArabicTimestamp();
+    const nowISO = new Date().toISOString();
+    const cleanEmail =
+      typeof body.customerEmail === 'string' ? body.customerEmail.trim().slice(0, 160) : '';
+    const wantsEmail = Boolean(body.sendViaEmail) && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(cleanEmail);
+
     const newOrder: StoreOrder = {
       orderNumber,
       customerName: body.customerName.trim().slice(0, 120),
       phone: body.phone.trim().slice(0, 30),
+      ...(cleanEmail ? { customerEmail: cleanEmail } : {}),
+      ...(wantsEmail ? { sendViaEmail: true } : {}),
       governorate: typeof body.governorate === 'string' ? body.governorate.trim() : 'القاهرة',
       address: typeof body.address === 'string' ? body.address.trim().slice(0, 240) : '',
       notes: typeof body.notes === 'string' ? body.notes.trim().slice(0, 240) : '',
@@ -632,8 +983,43 @@ async function startServer() {
       status: 'جديد',
       stockDeducted: true,
       createdAt: now,
+      createdAtISO: nowISO,
       updatedAt: now,
     };
+
+    const reqOrigin = `${req.protocol}://${req.get('host') || 'localhost:3000'}`;
+    const appBaseUrl = (process.env.APP_URL || '').trim().replace(/\/$/, '') || reqOrigin;
+    const absoluteLogoUrl = `${appBaseUrl}/images/brand-logo.jpg`;
+    const previewLogoUrl = '/images/brand-logo.jpg';
+
+    let emailHtml: string | undefined;
+    let emailStatus:
+      | {
+          requested: boolean;
+          sent: boolean;
+          providerConfigured: boolean;
+          recipient?: string;
+          message?: string;
+        }
+      | undefined;
+
+    if (wantsEmail) {
+      const dispatchHtml = buildOrderConfirmationEmailHtml(newOrder, absoluteLogoUrl);
+      emailHtml = buildOrderConfirmationEmailHtml(newOrder, previewLogoUrl);
+      const dispatchResult = await tryDispatchOrderEmail(
+        cleanEmail,
+        `تأكيد طلبك #${orderNumber} — M&M Candle Co.`,
+        dispatchHtml
+      );
+      newOrder.emailSent = dispatchResult.sent;
+      emailStatus = {
+        requested: true,
+        sent: dispatchResult.sent,
+        providerConfigured: dispatchResult.providerConfigured,
+        recipient: cleanEmail,
+        message: dispatchResult.message,
+      };
+    }
 
     const newNotifications: AdminNotification[] = [];
     for (const [pid, qty] of requestedByProduct.entries()) {
@@ -641,11 +1027,11 @@ async function startServer() {
       if (!prod) continue;
       prod.stock = Math.max(0, prod.stock - qty);
       const level: AdminNotification['level'] =
-        prod.stock === 0 ? 'out' : prod.stock <= LOW_STOCK_THRESHOLD ? 'low' : 'normal';
+        prod.stock === 0 ? 'out' : prod.stock <= lowStockThreshold ? 'low' : 'normal';
       const type: AdminNotification['type'] =
         prod.stock === 0
           ? 'out_of_stock'
-          : prod.stock <= LOW_STOCK_THRESHOLD
+          : prod.stock <= lowStockThreshold
           ? 'low_stock'
           : 'stock_deducted';
       newNotifications.push({
@@ -668,7 +1054,12 @@ async function startServer() {
 
     data.orders.unshift(newOrder);
     saveStoreData(data);
-    res.status(201).json({ order: newOrder, products: data.products });
+    res.status(201).json({
+      order: newOrder,
+      products: data.products,
+      ...(emailHtml ? { emailHtml } : {}),
+      ...(emailStatus ? { emailStatus } : {}),
+    });
   });
 
   // Public: track confirmed order by order number
@@ -737,7 +1128,7 @@ async function startServer() {
   });
 
   // Admin: upload product image from device (base64 data URL)
-  app.post('/api/admin/upload-image', requireAdmin, async (req, res) => {
+  app.post('/api/admin/upload-image', requireAdmin, (req, res) => {
     const { dataUrl } = (req.body || {}) as { dataUrl?: string };
     if (typeof dataUrl !== 'string') {
       res.status(400).json({ error: 'يرجى اختيار ملف صورة صالح.' });
@@ -998,16 +1389,17 @@ async function startServer() {
         }
       }
 
+      const lowStockThreshold = data.storeConfig.lowStockThreshold ?? DEFAULT_LOW_STOCK_THRESHOLD;
       for (const [pid, qty] of requested.entries()) {
         const prod = data.products.find((p) => p.id === pid);
         if (prod) {
           prod.stock = Math.max(0, prod.stock - qty);
           const level: AdminNotification['level'] =
-            prod.stock === 0 ? 'out' : prod.stock <= LOW_STOCK_THRESHOLD ? 'low' : 'normal';
+            prod.stock === 0 ? 'out' : prod.stock <= lowStockThreshold ? 'low' : 'normal';
           const type: AdminNotification['type'] =
             prod.stock === 0
               ? 'out_of_stock'
-              : prod.stock <= LOW_STOCK_THRESHOLD
+              : prod.stock <= lowStockThreshold
               ? 'low_stock'
               : 'stock_deducted';
           data.notifications.unshift({
@@ -1115,13 +1507,14 @@ async function startServer() {
     }
 
     prod.stock += amount;
+    const lowStockThreshold = data.storeConfig.lowStockThreshold ?? DEFAULT_LOW_STOCK_THRESHOLD;
     data.notifications = data.notifications.map((n) => {
       if (n.id === id) {
         return {
           ...n,
           read: true,
           remainingStock: prod.stock,
-          level: prod.stock === 0 ? 'out' : prod.stock <= LOW_STOCK_THRESHOLD ? 'low' : 'normal',
+          level: prod.stock === 0 ? 'out' : prod.stock <= lowStockThreshold ? 'low' : 'normal',
         };
       }
       return n;
@@ -1226,6 +1619,56 @@ async function startServer() {
 
     saveStoreData(data);
     res.json({ offer: data.seasonalOffer });
+  });
+
+  // Admin: update full runtime store configuration (custom perfume & candle prices/options, shipping, thresholds)
+  app.put('/api/admin/store-config', requireAdmin, (req, res) => {
+    const body = (req.body || {}) as Partial<StoreRuntimeConfig>;
+    const data = ensureStoreFile();
+    const merged = mergeStoreConfig({
+      ...data.storeConfig,
+      ...body,
+      customPerfume: body.customPerfume
+        ? { ...data.storeConfig.customPerfume, ...body.customPerfume }
+        : data.storeConfig.customPerfume,
+      customCandle: body.customCandle
+        ? { ...data.storeConfig.customCandle, ...body.customCandle }
+        : data.storeConfig.customCandle,
+    });
+    data.storeConfig = merged;
+    saveStoreData(data);
+    res.json({ storeConfig: data.storeConfig });
+  });
+
+  // Admin: update Scent of the Month poll options
+  app.put('/api/admin/scent-poll', requireAdmin, (req, res) => {
+    const body = (req.body || {}) as { options?: ScentPollOption[] };
+    if (!Array.isArray(body.options) || body.options.length < 2) {
+      res.status(400).json({ error: 'يجب أن يحتوي التصويت على خيارين على الأقل.' });
+      return;
+    }
+    const cleanOptions: ScentPollOption[] = body.options
+      .slice(0, 12)
+      .map((opt, idx) => ({
+        id:
+          typeof opt.id === 'string' && opt.id.trim()
+            ? opt.id.trim().slice(0, 60)
+            : `scent-${Date.now()}-${idx}`,
+        name: String(opt.name || '').trim().slice(0, 100),
+        notes: String(opt.notes || '').trim().slice(0, 180),
+        votes: Math.max(0, Math.round(Number(opt.votes) || 0)),
+      }))
+      .filter((opt) => opt.name.length > 0);
+
+    if (cleanOptions.length < 2) {
+      res.status(400).json({ error: 'يرجى إدخال اسم صالح لخيارين على الأقل.' });
+      return;
+    }
+
+    const data = ensureStoreFile();
+    data.scentPoll = cleanOptions;
+    saveStoreData(data);
+    res.json({ options: data.scentPoll });
   });
 
   if (process.env.NODE_ENV !== 'production') {
